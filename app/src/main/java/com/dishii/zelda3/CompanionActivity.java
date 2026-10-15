@@ -40,6 +40,16 @@ public class CompanionActivity extends Activity {
             // game runs on a separate display and keeps its own per-display focus,
             // so touching this screen doesn't steal the gamepad from the game.
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            // That only holds when the system gives each display its own focus.
+            // Firmwares with one global focus (GammaOS on the Anbernic RG DS /
+            // RG DS Plus) hand the gamepad to whichever window was focused last,
+            // which is this one, and the game screen there has no touch to take
+            // it back. On those, opt out of focus: touch still reaches the map
+            // and the gamepad stays with the game.
+            if (!hasPerDisplayFocus()) {
+                getWindow().addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE);
+                Log.i(TAG, "Global input focus: companion window made non-focusable");
+            }
             getWindow().getDecorView().setBackgroundColor(Color.BLACK);
             getWindow().getDecorView().setSystemUiVisibility(
                     android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
@@ -61,6 +71,22 @@ public class CompanionActivity extends Activity {
         instance = this;
         Log.i(TAG, "Companion activity up on display "
                 + getWindowManager().getDefaultDisplay().getDisplayId());
+    }
+
+    // config_perDisplayFocusEnabled is the framework switch for per-display
+    // focus (Android 10+). Anything older, or a build without the resource,
+    // has a single global focus.
+    private static boolean hasPerDisplayFocus() {
+        if (android.os.Build.VERSION.SDK_INT < 29) {
+            return false;
+        }
+        try {
+            android.content.res.Resources res = android.content.res.Resources.getSystem();
+            int id = res.getIdentifier("config_perDisplayFocusEnabled", "bool", "android");
+            return id != 0 && res.getBoolean(id);
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     @Override
