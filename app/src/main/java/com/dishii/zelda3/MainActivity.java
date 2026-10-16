@@ -21,6 +21,11 @@ import android.util.Log;
 //This class is the main SDLActivity and just sets up a bunch of default files
 public class MainActivity extends SDLActivity {
 
+    /** The running game activity, for CompanionActivity's controller forwarding. */
+    static MainActivity current() {
+        return mSingleton instanceof MainActivity ? (MainActivity) mSingleton : null;
+    }
+
     private static final String TAG = "Zelda3SecondScreen";
 
     private SecondScreenPresentation secondScreen;

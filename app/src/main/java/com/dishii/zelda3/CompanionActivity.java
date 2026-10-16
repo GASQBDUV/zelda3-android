@@ -6,7 +6,12 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.InputDevice;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.WindowManager;
+
+import org.libsdl.app.SDLControllerManager;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -16,9 +21,8 @@ import java.io.FileOutputStream;
  * secondary one (SecondScreenSwap = 1 in zelda3.ini). A Presentation can't be
  * used for this: the framework refuses to attach presentation windows to the
  * default display (InvalidDisplayException), so the swapped layout needs a real
- * activity. The window is non-focusable for the same reason the Presentation
- * is: gamepad input must stay with the game window even while this screen is
- * being touched.
+ * activity. It has to stay focusable (see onCreate), so controller input that
+ * reaches it is forwarded to the game window.
  */
 public class CompanionActivity extends Activity {
 
@@ -37,19 +41,8 @@ public class CompanionActivity extends Activity {
             // Unlike the bottom-screen Presentation, this activity is focusable: it
             // owns the default display, and leaving that display with no focusable
             // window makes any input routed there ANR ("no focused window"). The
-            // game runs on a separate display and keeps its own per-display focus,
-            // so touching this screen doesn't steal the gamepad from the game.
+            // gamepad focus it takes is handed back in dispatchKeyEvent below.
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-            // That only holds when the system gives each display its own focus.
-            // Firmwares with one global focus (GammaOS on the Anbernic RG DS /
-            // RG DS Plus) hand the gamepad to whichever window was focused last,
-            // which is this one, and the game screen there has no touch to take
-            // it back. On those, opt out of focus: touch still reaches the map
-            // and the gamepad stays with the game.
-            if (!hasPerDisplayFocus()) {
-                getWindow().addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE);
-                Log.i(TAG, "Global input focus: companion window made non-focusable");
-            }
             getWindow().getDecorView().setBackgroundColor(Color.BLACK);
             getWindow().getDecorView().setSystemUiVisibility(
                     android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
@@ -73,20 +66,44 @@ public class CompanionActivity extends Activity {
                 + getWindowManager().getDefaultDisplay().getDisplayId());
     }
 
-    // config_perDisplayFocusEnabled is the framework switch for per-display
-    // focus (Android 10+). Anything older, or a build without the resource,
-    // has a single global focus.
-    private static boolean hasPerDisplayFocus() {
-        if (android.os.Build.VERSION.SDK_INT < 29) {
+    // Gamepad input that lands here belongs to the game. A controller isn't
+    // tied to a display: Android sends its keys to whichever display is
+    // focused, and this activity, started after the game, takes that focus
+    // (on the RG DS / RG DS Plus the game panel has no touch, so the player
+    // can't tap focus back). Making this window non-focusable instead ANRs
+    // ("no focused window"), so hand the events to the game's own dispatch;
+    // its window keeps its internal view focus, so SDL picks them up as usual.
+    // Same approach as Dusklight's DuskCompanionActivity.
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (isFromController(event.getDevice())) {
+            Activity game = MainActivity.current();
+            if (game != null && game.dispatchKeyEvent(event)) {
+                return true;
+            }
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    // Sticks and triggers, same reasoning.
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent event) {
+        if (SDLControllerManager.isDeviceSDLJoystick(event.getDeviceId())
+                && SDLControllerManager.handleJoystickMotionEvent(event)) {
+            return true;
+        }
+        return super.dispatchGenericMotionEvent(event);
+    }
+
+    // Only real controllers: back/volume from elsewhere keep their usual meaning.
+    private static boolean isFromController(InputDevice device) {
+        if (device == null) {
             return false;
         }
-        try {
-            android.content.res.Resources res = android.content.res.Resources.getSystem();
-            int id = res.getIdentifier("config_perDisplayFocusEnabled", "bool", "android");
-            return id != 0 && res.getBoolean(id);
-        } catch (RuntimeException e) {
-            return false;
-        }
+        int sources = device.getSources();
+        return (sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
+                || (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+                || (sources & InputDevice.SOURCE_DPAD) == InputDevice.SOURCE_DPAD;
     }
 
     @Override
