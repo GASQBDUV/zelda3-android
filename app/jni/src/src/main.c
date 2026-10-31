@@ -36,6 +36,8 @@ bool SecondScreenSDL_Init(SDL_Window *main_window);
 bool SecondScreenSDL_HandleEvent(const SDL_Event *e);
 void SecondScreenSDL_Update(void);
 void SecondScreenSDL_Shutdown(void);
+bool SecondScreenSDL_SideMode(void);
+void SecondScreenSDL_BlitTo(SDL_Renderer *r, const SDL_Rect *dst);
 
 // Forwards
 static bool LoadRom(const char *filename);
@@ -374,10 +376,35 @@ static void SdlRenderer_EndDraw() {
 //  uint64 after = SDL_GetPerformanceCounter();
 //  float v = (double)(after - before) / SDL_GetPerformanceFrequency();
 //  printf("%f ms\n", v * 1000);
-  SDL_RenderClear(g_renderer);
-  SDL_RenderCopy(g_renderer, g_texture, &g_sdl_renderer_rect, NULL);
-  if (g_config.crt_filter)
-    CrtFilter_Draw();
+  bool side = SecondScreenSDL_SideMode();
+  if (!side) SDL_RenderClear(g_renderer);
+  if (side) {
+    static uint64 t_acc[3], t_n;
+    uint64 t0 = SDL_GetPerformanceCounter();
+    // the game on the left half of the window (the top panel), the second screen on the right (the bottom one)
+    int ow, oh;
+    SDL_GetRendererOutputSize(g_renderer, &ow, &oh);
+    SDL_Rect left = { 0, 0, ow / 2, oh }, right = { ow / 2, 0, ow / 2, oh };
+    SDL_RenderSetViewport(g_renderer, &left);
+    SDL_RenderCopy(g_renderer, g_texture, &g_sdl_renderer_rect, NULL);
+    SDL_RenderSetViewport(g_renderer, NULL);
+    uint64 t1 = SDL_GetPerformanceCounter();
+    SecondScreenSDL_BlitTo(g_renderer, &right);
+    uint64 t2 = SDL_GetPerformanceCounter();
+    SDL_RenderPresent(g_renderer);
+    uint64 t3 = SDL_GetPerformanceCounter();
+    t_acc[0] += t1 - t0; t_acc[1] += t2 - t1; t_acc[2] += t3 - t2;
+    if (++t_n == 120 && SDL_getenv("ZELDA3_SS_DEBUG")) {
+      double f = 1000.0 / SDL_GetPerformanceFrequency() / t_n;
+      printf("frame ms: game %.2f ui %.2f present %.2f%s", t_acc[0] * f, t_acc[1] * f, t_acc[2] * f, "\n");
+      t_acc[0] = t_acc[1] = t_acc[2] = t_n = 0;
+    }
+    return;
+  } else {
+    SDL_RenderCopy(g_renderer, g_texture, &g_sdl_renderer_rect, NULL);
+    if (g_config.crt_filter)
+      CrtFilter_Draw();
+  }
   SDL_RenderPresent(g_renderer); // vsyncs to 60 FPS?
 }
 
@@ -603,9 +630,11 @@ int main(int argc, char** argv) {
     extern void SecondScreen_RunFrameHook(void);
     SecondScreen_RunFrameHook();
 
+    uint64 pf0 = SDL_GetPerformanceCounter();
     SDL_LockMutex(g_audio_mutex);
     bool is_replay = ZeldaRunFrame(inputs);
     SDL_UnlockMutex(g_audio_mutex);
+    uint64 pf1 = SDL_GetPerformanceCounter();
 
     frameCtr++;
 
@@ -614,7 +643,21 @@ int main(int argc, char** argv) {
     }
 
     DrawPpuFrameWithPerf();
+    uint64 pf2 = SDL_GetPerformanceCounter();
     SecondScreenSDL_Update();
+    uint64 pf3 = SDL_GetPerformanceCounter();
+    {
+      static uint64 acc[3], last, n;
+      acc[0] += pf1 - pf0; acc[1] += pf2 - pf1; acc[2] += pf3 - pf2;
+      if (++n == 120) {
+        double ms = 1000.0 / SDL_GetPerformanceFrequency();
+        uint64 now = SDL_GetPerformanceCounter();
+        if (last && SDL_getenv("ZELDA3_SS_DEBUG"))
+          printf("loop: %.1f fps | run %.2f ppu+draw %.2f ui %.2f ms%s", 120.0 * SDL_GetPerformanceFrequency() / (now - last),
+                 acc[0] * ms / n, acc[1] * ms / n, acc[2] * ms / n, "\n");
+        last = now; acc[0] = acc[1] = acc[2] = n = 0;
+      }
+    }
 
     if (g_config.display_perf_title) {
       char title[60];

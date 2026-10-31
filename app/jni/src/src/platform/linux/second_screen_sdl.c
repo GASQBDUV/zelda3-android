@@ -958,10 +958,26 @@ static void draw_tab_bar(float tab_h) {
 
 static SDL_Window *main_win;
 static bool ss_enabled;
+// ZELDA3_SECOND_SCREEN=side: no second window. The game window spans both panels (BananaOS's SDL_BANANA_PANELS=side,
+// the top panel the left half, the bottom one the right) and the UI is drawn on a surface that the game's renderer
+// puts in the right half. Touches there come in as events of the one window.
+static bool ss_side;
+// in side mode the UI is drawn by a thread of its own (a redraw takes ~20 ms of software rendering, which stalled
+// the game); ss_lock is held while it draws and while a tap changes the UI's state
+static SDL_mutex *ss_lock;
+static SDL_Thread *ss_thread;
+// the UI thread draws on ss_surf and, when a frame is finished, copies it to ss_front under ss_pix_lock; the game's
+// renderer only ever reads ss_front, so it never shows a half-drawn frame (that flickered)
+static SDL_Surface *ss_front;
+static SDL_mutex *ss_pix_lock;
+static bool ss_front_dirty;
+static SDL_Surface *ss_surf;
+static SDL_Texture *ss_present_tex;
 
 bool SecondScreenSDL_Init(SDL_Window *main_window) {
   const char *env = SDL_getenv("ZELDA3_SECOND_SCREEN");
-  if (!env || env[0] != '1') return false;
+  if (!env || (env[0] != '1' && SDL_strcmp(env, "side") != 0)) return false;
+  ss_side = env[0] == 's';
   main_win = main_window;
   ss_enabled = true;
   return true;
@@ -972,6 +988,35 @@ bool SecondScreenSDL_Init(SDL_Window *main_window) {
 // output mid-init can resize the game window under its GL renderer.
 static bool ensure_window(void) {
   if (ss_win) return true;
+
+  if (ss_side) {
+    int ww = 0, wh = 0;
+    SDL_GetWindowSize(main_win, &ww, &wh);
+    W = ww / 2; H = wh;
+    if (W <= 0 || H <= 0) { W = 1024; H = 768; }
+    ss_surf = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_ARGB8888);
+    ss_r = ss_surf ? SDL_CreateSoftwareRenderer(ss_surf) : NULL;
+    if (!ss_r) {
+      fprintf(stderr, "second screen: surface renderer failed: %s\n", SDL_GetError());
+      if (ss_surf) { SDL_FreeSurface(ss_surf); ss_surf = NULL; }
+      ss_enabled = false;
+      return false;
+    }
+    ss_pix_lock = SDL_CreateMutex();
+    ss_front = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!ss_front || !ss_pix_lock) {
+      fprintf(stderr, "second screen: front buffer failed: %s\n", SDL_GetError());
+      ss_enabled = false;
+      return false;
+    }
+    ss_win = main_win;
+    ss_winid = SDL_GetWindowID(main_win);
+    u = (W < H ? W : H) / 720.0f;
+    printf("second screen: right half of the %dx%d window, %dx%d (u=%.2f)\n", ww, wh, W, H, u);
+    fflush(stdout);
+    return true;
+  }
+
 
   printf("second screen: creating window...\n");
   fflush(stdout);
@@ -1093,6 +1138,29 @@ static void handle_tap(float x, float y) {
 
 bool SecondScreenSDL_HandleEvent(const SDL_Event *e) {
   if (!ss_win) return false;
+  if (ss_side) {
+    float x = -1, y = 0;
+    bool down = false;
+    switch (e->type) {
+    case SDL_FINGERDOWN: down = true; /* fallthrough */
+    case SDL_FINGERUP: case SDL_FINGERMOTION:
+      x = e->tfinger.x * 2 * W; y = e->tfinger.y * H; break;
+    case SDL_MOUSEBUTTONDOWN: down = e->button.which != SDL_TOUCH_MOUSEID; /* fallthrough */
+    case SDL_MOUSEBUTTONUP:
+      x = (float)e->button.x; y = (float)e->button.y; break;
+    case SDL_MOUSEMOTION:
+      x = (float)e->motion.x; y = (float)e->motion.y; break;
+    default: return false;
+    }
+    if (SDL_getenv("ZELDA3_SS_DEBUG")) printf("second screen: event %d at %.0f,%.0f\n", e->type, x, y);
+    if (x < W) return false;
+    if (down) {
+      if (ss_lock) SDL_LockMutex(ss_lock);
+      handle_tap(x - W, y);
+      if (ss_lock) SDL_UnlockMutex(ss_lock);
+    }
+    return true;
+  }
   switch (e->type) {
   case SDL_FINGERDOWN:
     if (e->tfinger.windowID == ss_winid) { handle_tap(e->tfinger.x * W, e->tfinger.y * H); return true; }
@@ -1118,15 +1186,50 @@ bool SecondScreenSDL_HandleEvent(const SDL_Event *e) {
   }
 }
 
+static void ss_update_body(void);
+
+static int ss_thread_main(void *arg) {
+  (void)arg;
+  const char *d = SDL_getenv("ZELDA3_SS_DELAY");
+  int delay = d && SDL_atoi(d) >= 0 ? SDL_atoi(d) : 40;
+  while (ss_enabled) {
+    SDL_LockMutex(ss_lock);
+    ss_update_body();
+    SDL_UnlockMutex(ss_lock);
+    if (ss_front && ss_surf) {
+      SDL_LockMutex(ss_pix_lock);
+      SDL_memcpy(ss_front->pixels, ss_surf->pixels, (size_t)ss_surf->pitch * ss_surf->h);
+      ss_front_dirty = true;
+      SDL_UnlockMutex(ss_pix_lock);
+    }
+    SDL_Delay(delay);
+  }
+  return 0;
+}
+
 void SecondScreenSDL_Update(void) {
   if (!ss_enabled) return;
+  if (ss_side) {
+    if (!ss_thread) {
+      ss_lock = SDL_CreateMutex();
+      ss_thread = SDL_CreateThread(ss_thread_main, "second screen", NULL);
+    }
+    return;
+  }
+  ss_update_body();
+}
+
+static void ss_update_body(void) {
   static uint32_t frame_no;
   frame_no++;
   if (!ss_win) {
     if (frame_no < 3) return;      // let the game settle its first GL frames
     if (!ensure_window()) return;  // disables itself on failure
   }
-  if (frame_no & 1) return;   // UI renders at 30fps
+  // UI renders at 30fps (side by side with the game in software: ZELDA3_SS_DIV=n renders every n-th frame instead)
+  static int ui_div;
+  if (!ui_div) { const char *d = SDL_getenv("ZELDA3_SS_DIV"); ui_div = d && SDL_atoi(d) > 0 ? SDL_atoi(d) : (ss_side ? 1 : 2); }
+  if (frame_no % ui_div) return;
 
   // rebuild the renderer if the compositor resized us
   if (ss_needs_rebuild) {
@@ -1249,8 +1352,34 @@ static void rebuild_renderer(int w2, int h2) {
 
 void SecondScreenSDL_Shutdown(void) {
   ss_enabled = false;
+  if (ss_thread) { SDL_WaitThread(ss_thread, NULL); ss_thread = NULL; }
   if (!ss_win) return;
   destroy_textures();
   SDL_DestroyRenderer(ss_r); ss_r = NULL;
+  if (ss_side) {
+    if (ss_present_tex) { SDL_DestroyTexture(ss_present_tex); ss_present_tex = NULL; }
+    if (ss_surf) { SDL_FreeSurface(ss_surf); ss_surf = NULL; }
+    if (ss_front) { SDL_FreeSurface(ss_front); ss_front = NULL; }
+    ss_win = NULL;  // the game's own window
+    return;
+  }
   SDL_DestroyWindow(ss_win); ss_win = NULL;
+}
+
+bool SecondScreenSDL_SideMode(void) { return ss_enabled && ss_side; }
+
+// Called by the game's renderer, with the UI's half of its window as dst, before it presents.
+void SecondScreenSDL_BlitTo(SDL_Renderer *r, const SDL_Rect *dst) {
+  if (!ss_side || !ss_front) return;
+  if (!ss_present_tex) {
+    ss_present_tex = SDL_CreateTexture(r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, ss_front->w, ss_front->h);
+    if (!ss_present_tex) return;
+  }
+  SDL_LockMutex(ss_pix_lock);
+  if (ss_front_dirty) {
+    SDL_UpdateTexture(ss_present_tex, NULL, ss_front->pixels, ss_front->pitch);
+    ss_front_dirty = false;
+  }
+  SDL_UnlockMutex(ss_pix_lock);
+  SDL_RenderCopy(r, ss_present_tex, NULL, dst);
 }

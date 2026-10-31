@@ -1,4 +1,12 @@
 # zelda3-android
+
+> **Which branch is which**
+>
+> | Branch | Target | What it is |
+> |---|---|---|
+> | `dual-screen` | **Android** | The APK (Android Studio / `./gradlew assembleDebug`), second screen as a second Android display. |
+> | `bananaos-linux` (this one) | **Linux** (BananaOS on the Anbernic RG DS, aarch64 SDL2; also desktop Linux) | The `make zelda3` build with the second screen in the right half of one window over both panels. |
+
 A port of Zelda3 to Android with a second screen mod for dual screen devices like the AYN Thor.
 
 Original Repository: https://github.com/snesrev/zelda3 <br>
@@ -66,6 +74,32 @@ make zelda3          # needs SDL2 dev headers (libsdl2-dev / SDL2-devel / sdl2)
 This compiles `src/*.c` + `src/platform/linux/*.c` into the `zelda3` binary. Enable the second screen with `ZELDA3_SECOND_SCREEN=1` (env knobs are documented at the top of `second_screen_sdl.c`).
 
 The generated tables (`src/platform/linux/ss_sheets.h`, `ss_textures.h`) come from `app/src/main/assets/secondscreen/` and are committed, so a normal build doesn't regenerate them. If those assets change, run `python tools/secondscreen/gen_linux_tables.py` from the repo root (needs Pillow).
+
+# Linux on BananaOS (Anbernic RG DS): one window over both panels
+
+This branch (`bananaos-linux`) is the Linux build, not the Android app. On BananaOS the SDL KMSDRM driver only
+drives one panel, so the second screen is not a second window: the game runs in a single 2048x768 window that
+BananaOS's SDL puts on both panels (`SDL_BANANA_PANELS=side`, the top panel the left half, the bottom one the right)
+and the UI is drawn into the right half. Taps there reach the UI as touch events of the one window.
+
+```
+ZELDA3_SECOND_SCREEN=side            # draw the UI in the right half of the game's window
+ZELDA3_SS_DELAY=40                   # ms the UI thread waits between redraws (default 40)
+ZELDA3_SS_DEBUG=1                    # print touches and per-frame timings
+```
+
+With `ZELDA3_SECOND_SCREEN=1` the old behaviour is unchanged (a second window on the second display).
+
+Needed in `zelda3.ini`: `WindowSize = 2048x768`, `Fullscreen = 0`, `OutputMethod = SDL-Software`.
+The UI is drawn by a thread of its own and handed over through a second buffer, so the game never waits for it
+and never shows a half-drawn frame.
+
+`bananaos/Zelda 3 (fork, 2 screens).sh` is the PortMaster-style launcher used on the device (it sets
+`SDL_VIDEODRIVER=evdev`, `SDL_BANANA_PANELS=side` and switches the bottom panel's backlight on).
+
+Cross-building for the device (aarch64, glibc 2.41): a Debian trixie chroot with `crossbuild-essential-arm64` and
+`libsdl2-dev:arm64`, then `make zelda3 CC=aarch64-linux-gnu-gcc CFLAGS="-O2 -I . -I/usr/include/SDL2 -D_REENTRANT"`
+in `app/jni/src`. `zelda3_assets.dat` comes from the original port.
 
 # MSU-1 music (custom soundtracks)
 
