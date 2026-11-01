@@ -1,0 +1,2 @@
+# shell scripts run on the device: always LF, whatever the checkout's autocrlf says
+*.sh text eol=lf

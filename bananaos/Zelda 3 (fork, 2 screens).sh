@@ -13,6 +13,8 @@ get_controls
 
 GAMEDIR="/$directory/ports/zelda-fork2"
 cd $GAMEDIR
+# a zip extracted on some file systems loses the executable bit
+chmod +x ./zelda3.fork2 2>/dev/null
 
 # run-port switched the bottom panel's backlight off for a one-panel port: this one uses both
 . /usr/libexec/banana/one-panel
